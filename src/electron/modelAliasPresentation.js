@@ -21,70 +21,70 @@ function mapValues(value, project) {
   return Object.fromEntries(Object.entries(value).map(([key, row]) => [key, project(row)]));
 }
 
-function addModelId(target, value) {
+function addModelId(modelIds, value) {
   if (typeof value !== 'string') return;
   const model = value.trim();
-  if (model) target.add(model);
+  if (model) modelIds.add(model);
 }
 
-function addModelMapIds(target, value) {
+function addModelMapIds(modelIds, value) {
   if (!value || typeof value !== 'object') return;
-  for (const model of Object.keys(value)) addModelId(target, model);
+  for (const model of Object.keys(value)) addModelId(modelIds, model);
 }
 
-function addClientModelIds(target, value) {
+function addClientModelIds(modelIds, value) {
   if (!value || typeof value !== 'object') return;
-  for (const models of Object.values(value)) addModelMapIds(target, models);
+  for (const models of Object.values(value)) addModelMapIds(modelIds, models);
 }
 
-function collectUsageModelIds(value, target = new Set()) {
-  if (!value || typeof value !== 'object') return target;
-  addModelId(target, value.model);
-  for (const field of MODEL_MAP_FIELDS) addModelMapIds(target, value[field]);
-  for (const field of ['clientModels', 'clientModelCosts']) addClientModelIds(target, value[field]);
+function collectUsageModelIds(value, modelIds = new Set()) {
+  if (!value || typeof value !== 'object') return modelIds;
+  addModelId(modelIds, value.model);
+  for (const field of MODEL_MAP_FIELDS) addModelMapIds(modelIds, value[field]);
+  for (const field of ['clientModels', 'clientModelCosts']) addClientModelIds(modelIds, value[field]);
   for (const field of ['sessions', 'projects']) {
-    for (const row of Object.values(value[field] || {})) collectUsageModelIds(row, target);
+    for (const row of Object.values(value[field] || {})) collectUsageModelIds(row, modelIds);
   }
-  return target;
+  return modelIds;
 }
 
-function collectHistoryModelIds(history, target = new Set()) {
-  if (!history || typeof history !== 'object') return target;
+function collectHistoryModelIds(history, modelIds = new Set()) {
+  if (!history || typeof history !== 'object') return modelIds;
   for (const field of ['daily', 'monthly']) {
     for (const row of Array.isArray(history[field]) ? history[field] : []) {
-      addModelMapIds(target, row?.perModel);
-      addClientModelIds(target, row?.clientModelCosts);
+      addModelMapIds(modelIds, row?.perModel);
+      addClientModelIds(modelIds, row?.clientModelCosts);
     }
   }
-  addModelId(target, history.summary?.favoriteModel);
-  addClientModelIds(target, history.summary?.clientModelCosts);
+  addModelId(modelIds, history.summary?.favoriteModel);
+  addClientModelIds(modelIds, history.summary?.clientModelCosts);
   for (const device of Array.isArray(history.deviceHistories) ? history.deviceHistories : []) {
-    for (const period of Object.values(device?.periods || {})) collectUsageModelIds(period, target);
-    collectHistoryModelIds(device?.history, target);
+    for (const period of Object.values(device?.periods || {})) collectUsageModelIds(period, modelIds);
+    collectHistoryModelIds(device?.history, modelIds);
   }
-  return target;
+  return modelIds;
 }
 
 function collectStatsModelIds(stats) {
-  const target = new Set();
-  if (!stats || typeof stats !== 'object') return target;
-  for (const period of Object.values(stats.periods || {})) collectUsageModelIds(period, target);
-  for (const field of ['today', 'month', 'allTime']) collectUsageModelIds(stats[field], target);
+  const modelIds = new Set();
+  if (!stats || typeof stats !== 'object') return modelIds;
+  for (const period of Object.values(stats.periods || {})) collectUsageModelIds(period, modelIds);
+  for (const field of ['today', 'month', 'allTime']) collectUsageModelIds(stats[field], modelIds);
   for (const device of Array.isArray(stats.devices) ? stats.devices : []) {
-    for (const period of Object.values(device?.periods || {})) collectUsageModelIds(period, target);
-    for (const field of ['today', 'month', 'allTime']) collectUsageModelIds(device?.[field], target);
-    collectHistoryModelIds(device?.history, target);
-    collectHistoryModelIds(device?.historyPreview, target);
+    for (const period of Object.values(device?.periods || {})) collectUsageModelIds(period, modelIds);
+    for (const field of ['today', 'month', 'allTime']) collectUsageModelIds(device?.[field], modelIds);
+    collectHistoryModelIds(device?.history, modelIds);
+    collectHistoryModelIds(device?.historyPreview, modelIds);
   }
-  for (const row of Object.values(stats.allTimeSessionsView || {})) collectUsageModelIds(row, target);
+  for (const row of Object.values(stats.allTimeSessionsView || {})) collectUsageModelIds(row, modelIds);
   for (const field of ['nativeSessions', 'nativeProjects']) {
     for (const period of Object.values(stats[field] || {})) {
-      for (const row of Object.values(period || {})) collectUsageModelIds(row, target);
+      for (const row of Object.values(period || {})) collectUsageModelIds(row, modelIds);
     }
   }
-  collectHistoryModelIds(stats.history, target);
-  collectHistoryModelIds(stats.historyPreview, target);
-  return target;
+  collectHistoryModelIds(stats.history, modelIds);
+  collectHistoryModelIds(stats.historyPreview, modelIds);
+  return modelIds;
 }
 
 function foldModelMap(value, resolve) {
