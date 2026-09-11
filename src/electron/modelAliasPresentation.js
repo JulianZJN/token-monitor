@@ -1,6 +1,10 @@
 'use strict';
 
-const { normalizeModelAliases, createModelAliasResolver } = require('./renderer/modelAliases');
+const {
+  normalizeModelAliases,
+  inferModelAliases,
+  createModelAliasResolver
+} = require('./renderer/modelAliases');
 const { historyRevision, num } = require('../shared/history');
 
 const MODEL_MAP_FIELDS = [
@@ -15,6 +19,72 @@ const MODEL_MAP_FIELDS = [
 function mapValues(value, project) {
   if (!value || typeof value !== 'object') return value;
   return Object.fromEntries(Object.entries(value).map(([key, row]) => [key, project(row)]));
+}
+
+function addModelId(target, value) {
+  if (typeof value !== 'string') return;
+  const model = value.trim();
+  if (model) target.add(model);
+}
+
+function addModelMapIds(target, value) {
+  if (!value || typeof value !== 'object') return;
+  for (const model of Object.keys(value)) addModelId(target, model);
+}
+
+function addClientModelIds(target, value) {
+  if (!value || typeof value !== 'object') return;
+  for (const models of Object.values(value)) addModelMapIds(target, models);
+}
+
+function collectUsageModelIds(value, target = new Set()) {
+  if (!value || typeof value !== 'object') return target;
+  addModelId(target, value.model);
+  for (const field of MODEL_MAP_FIELDS) addModelMapIds(target, value[field]);
+  for (const field of ['clientModels', 'clientModelCosts']) addClientModelIds(target, value[field]);
+  for (const field of ['sessions', 'projects']) {
+    for (const row of Object.values(value[field] || {})) collectUsageModelIds(row, target);
+  }
+  return target;
+}
+
+function collectHistoryModelIds(history, target = new Set()) {
+  if (!history || typeof history !== 'object') return target;
+  for (const field of ['daily', 'monthly']) {
+    for (const row of Array.isArray(history[field]) ? history[field] : []) {
+      addModelMapIds(target, row?.perModel);
+      addClientModelIds(target, row?.clientModelCosts);
+    }
+  }
+  addModelId(target, history.summary?.favoriteModel);
+  addClientModelIds(target, history.summary?.clientModelCosts);
+  for (const device of Array.isArray(history.deviceHistories) ? history.deviceHistories : []) {
+    for (const period of Object.values(device?.periods || {})) collectUsageModelIds(period, target);
+    collectHistoryModelIds(device?.history, target);
+  }
+  return target;
+}
+
+function collectStatsModelIds(stats) {
+  const target = new Set();
+  if (!stats || typeof stats !== 'object') return target;
+  for (const period of Object.values(stats.periods || {})) collectUsageModelIds(period, target);
+  for (const field of ['today', 'month', 'allTime']) collectUsageModelIds(stats[field], target);
+  for (const device of Array.isArray(stats.devices) ? stats.devices : []) {
+    for (const period of Object.values(device?.periods || {})) collectUsageModelIds(period, target);
+    for (const field of ['today', 'month', 'allTime']) collectUsageModelIds(device?.[field], target);
+    collectHistoryModelIds(device?.history, target);
+    collectHistoryModelIds(device?.historyPreview, target);
+  }
+  for (const row of Object.values(stats.allTimeSessionsView || {})) collectUsageModelIds(row, target);
+  for (const field of ['nativeSessions', 'nativeProjects']) {
+    for (const period of Object.values(stats[field] || {})) {
+      for (const row of Object.values(period || {})) collectUsageModelIds(row, target);
+    }
+  }
+  collectHistoryModelIds(stats.history, target);
+  collectHistoryModelIds(stats.historyPreview, target);
+  return target;
 }
 
 function foldModelMap(value, resolve) {
@@ -132,28 +202,41 @@ function projectHistory(history, resolve, fallbackModels) {
   return result;
 }
 
+function aliasPlan(modelIds, aliases) {
+  const explicit = normalizeModelAliases(aliases);
+  const automatic = inferModelAliases(modelIds);
+  return {
+    explicit,
+    automatic,
+    active: Object.keys(explicit).length > 0 || Object.keys(automatic).length > 0,
+    resolve: createModelAliasResolver(explicit, modelIds)
+  };
+}
+
 function projectModelAliasHistory(history, aliases) {
-  const normalized = normalizeModelAliases(aliases);
-  if (Object.keys(normalized).length === 0) return history;
-  return projectHistory(history, createModelAliasResolver(normalized));
+  if (!history || typeof history !== 'object') return history;
+  const modelIds = [...collectHistoryModelIds(history)];
+  const plan = aliasPlan(modelIds, aliases);
+  return plan.active ? projectHistory(history, plan.resolve) : history;
 }
 
 function projectModelAliasStats(stats, aliases) {
-  const normalized = normalizeModelAliases(aliases);
-  if (!stats || Object.keys(normalized).length === 0) return stats;
-  const resolve = createModelAliasResolver(normalized);
+  if (!stats || typeof stats !== 'object') return stats;
+  const sourceIds = [...collectStatsModelIds(stats)];
+  const plan = aliasPlan(sourceIds, aliases);
+  if (!plan.active) return stats;
 
   const projectRecord = (record) => {
     const result = { ...record };
-    if (record.periods) result.periods = mapValues(record.periods, (period) => projectUsage(period, resolve));
+    if (record.periods) result.periods = mapValues(record.periods, (period) => projectUsage(period, plan.resolve));
     for (const field of ['today', 'month', 'allTime']) {
-      if (record[field]) result[field] = projectUsage(record[field], resolve);
+      if (record[field]) result[field] = projectUsage(record[field], plan.resolve);
     }
     for (const field of ['history', 'historyPreview']) {
       if (record[field]) {
         result[field] = projectHistory(
           record[field],
-          resolve,
+          plan.resolve,
           record.periods?.allTime?.models || record.allTime?.models
         );
       }
@@ -162,24 +245,29 @@ function projectModelAliasStats(stats, aliases) {
   };
 
   const result = projectRecord(stats);
-  const sourceIds = new Set();
+  const pricingSourceIds = new Set();
   for (const period of ['today', 'month', 'allTime']) {
-    for (const model of Object.keys(stats.periods?.[period]?.models || {})) sourceIds.add(model);
-    for (const model of Object.keys(stats[period]?.models || {})) sourceIds.add(model);
+    addModelMapIds(pricingSourceIds, stats.periods?.[period]?.models);
+    addModelMapIds(pricingSourceIds, stats[period]?.models);
   }
-  result.modelAliasSourceIds = [...sourceIds].sort();
+  result.modelAliasSourceIds = [...pricingSourceIds].sort();
 
   if (Array.isArray(stats.devices)) result.devices = stats.devices.map(projectRecord);
   if (stats.allTimeSessionsView) {
-    result.allTimeSessionsView = mapValues(stats.allTimeSessionsView, (session) => projectUsage(session, resolve));
+    result.allTimeSessionsView = mapValues(stats.allTimeSessionsView, (session) => projectUsage(session, plan.resolve));
   }
   for (const field of ['nativeSessions', 'nativeProjects']) {
     if (stats[field]) {
-      result[field] = mapValues(stats[field], (period) => mapValues(period, (row) => projectUsage(row, resolve)));
+      result[field] = mapValues(stats[field], (period) => mapValues(period, (row) => projectUsage(row, plan.resolve)));
     }
   }
 
-  const revision = historyRevision({ summary: { modelAliases: normalized } });
+  const revision = historyRevision({
+    summary: {
+      modelAliases: plan.explicit,
+      automaticModelAliases: plan.automatic
+    }
+  });
   for (const field of ['historyRevision', 'deviceHistoryRevision']) {
     result[field] = `${stats[field] || ''}:aliases:${revision}`;
   }
@@ -188,6 +276,7 @@ function projectModelAliasStats(stats, aliases) {
 
 module.exports = {
   normalizeModelAliases,
+  inferModelAliases,
   createModelAliasResolver,
   projectModelAliasStats,
   projectModelAliasHistory
