@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   verify:
-    if: ${{ !contains(github.event.head_commit.message, '[debug]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[verified]') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,23 +23,19 @@ jobs:
       - name: Apply compatibility updates
         run: python scripts/tmp-pr661-auto-merge.py
       - run: npm ci
-      - name: Verify
-        id: verify
-        continue-on-error: true
-        shell: bash
-        run: |
-          set +e
-          npm run verify 2>&1 | tee verify.log
-          status=${PIPESTATUS[0]}
-          echo "status=$status" >> "$GITHUB_OUTPUT"
-      - name: Publish verification output
-        if: always()
+      - run: npm run verify
+      - run: git diff --check
+      - name: Commit verified source files
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -f verify.log
-          git commit -m "test(models): capture verification output [debug]"
+          git add README.md docs/model-aliases.md \
+            src/electron/modelAliasPresentation.js \
+            src/electron/renderer/modelAliases.js \
+            src/electron/renderer/index.html \
+            src/electron/renderer/i18n.js \
+            tests/electron/modelAliasAutoMerge.test.js \
+            tests/electron/modelAliasPresentation.test.js \
+            tests/electron/modelAliasIntegration.test.js
+          git commit -m "fix(models): merge duplicate model IDs automatically [verified]"
           git push origin HEAD:${GITHUB_REF_NAME}
-      - name: Fail on verification errors
-        if: steps.verify.outputs.status != '0'
-        run: exit 1
