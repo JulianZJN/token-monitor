@@ -1,0 +1,36 @@
+name: Temporary PR 661 automatic model merge verification
+
+on:
+  push:
+    branches:
+      - verify/pr661-auto-model-dedupe-20260912
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Apply compatibility updates
+        run: |
+          python scripts/tmp-pr661-auto-merge.py
+          rm scripts/tmp-pr661-auto-merge.py
+          rm .github/workflows/tmp-pr661-auto-merge.yml
+      - run: npm ci
+      - run: npm run verify
+      - run: git diff --check
+      - name: Commit verified tree
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix(models): merge duplicate model IDs automatically"
+          git push origin HEAD:${GITHUB_REF_NAME}
