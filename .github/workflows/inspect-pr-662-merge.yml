@@ -1,0 +1,37 @@
+name: Inspect PR 662 merge
+
+on:
+  push:
+    branches:
+      - automation/resolve-662
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Inspect merge conflicts
+        shell: bash
+        run: |
+          git remote add upstream https://github.com/Javis603/token-monitor.git
+          git fetch upstream main
+          set +e
+          git merge --no-commit --no-ff upstream/main
+          merge_exit=$?
+          echo "merge_exit=$merge_exit"
+          echo "status:"
+          git status --short
+          echo "conflicts:"
+          conflicts="$(git diff --name-only --diff-filter=U)"
+          printf '%s\n' "$conflicts"
+          for file in $conflicts; do
+            echo "::group::$file"
+            git diff --cc -- "$file"
+            echo "::endgroup::"
+          done
+          exit 1
