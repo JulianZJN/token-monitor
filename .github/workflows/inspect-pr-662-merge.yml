@@ -18,6 +18,8 @@ jobs:
       - name: Inspect merge conflicts
         shell: bash
         run: |
+          git config user.name "Julian"
+          git config user.email "148066842+JulianZJN@users.noreply.github.com"
           git remote add upstream https://github.com/Javis603/token-monitor.git
           git fetch upstream main
           set +e
