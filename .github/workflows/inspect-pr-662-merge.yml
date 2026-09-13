@@ -1,4 +1,4 @@
-name: Inspect PR 662 merge
+name: Resolve PR 662 merge
 
 on:
   push:
@@ -6,34 +6,51 @@ on:
       - automation/resolve-662
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  inspect:
+  resolve:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: Inspect merge conflicts
+      - name: Merge current upstream and verify
         shell: bash
         run: |
+          set -euo pipefail
           git config user.name "Julian"
           git config user.email "148066842+JulianZJN@users.noreply.github.com"
           git remote add upstream https://github.com/Javis603/token-monitor.git
           git fetch upstream main
-          set +e
-          git merge --no-commit --no-ff upstream/main
-          merge_exit=$?
-          echo "merge_exit=$merge_exit"
-          echo "status:"
-          git status --short
-          echo "conflicts:"
-          conflicts="$(git diff --name-only --diff-filter=U)"
-          printf '%s\n' "$conflicts"
-          for file in $conflicts; do
-            echo "::group::$file"
-            git diff --cc -- "$file"
-            echo "::endgroup::"
-          done
-          exit 1
+          git fetch origin feat/codex-web-cost-selection
+          git checkout -B feat/codex-web-cost-selection origin/feat/codex-web-cost-selection
+
+          if ! git merge --no-commit --no-ff upstream/main; then
+            python <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('docs/API.md')
+          text = path.read_text()
+          pattern = re.compile(r'<<<<<<< HEAD\n(.*?)=======\n(.*?)>>>>>>> upstream/main\n', re.S)
+          resolved, count = pattern.subn(lambda m: m.group(1).rstrip() + '\n' + m.group(2).lstrip(), text)
+          if count != 1:
+              raise SystemExit(f'expected one docs/API.md conflict, found {count}')
+          path.write_text(resolved)
+          PY
+            git add docs/API.md
+            git checkout --theirs src/shared/hubBuildRegistry.json worker/src/shared/hubBuildRegistry.json
+            git add src/shared/hubBuildRegistry.json worker/src/shared/hubBuildRegistry.json
+          fi
+
+          unresolved="$(git diff --name-only --diff-filter=U)"
+          test -z "$unresolved" || { printf 'unresolved conflicts:\n%s\n' "$unresolved"; exit 1; }
+
+          npm ci
+          npm run update:hub-build
+          npm run verify
+
+          git add -A
+          git commit -m "merge: sync cost selection with current main"
+          git push origin HEAD:feat/codex-web-cost-selection
