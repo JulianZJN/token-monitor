@@ -1,4 +1,4 @@
-name: Export PR 662 merge bundle
+name: Resolve PR 662 against current main
 
 on:
   push:
@@ -6,34 +6,207 @@ on:
       - ci/resolve-662-bundle
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  export:
+  resolve-and-validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: feat/codex-web-cost-selection
           fetch-depth: 0
-      - name: Build two-ref bundle
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.16.0'
+          cache: npm
+
+      - name: Merge the reviewed upstream head
         shell: bash
         run: |
           set -euo pipefail
+          expected_head='6651af01460ade4977b995275b48efa75ed1d8d9'
+          upstream_head='8ad5769cb0636a59df4e92b7797c955ada833594'
+          test "$(git rev-parse HEAD)" = "$expected_head"
+          git config user.name 'JulianZJN'
+          git config user.email '148066842+JulianZJN@users.noreply.github.com'
           git remote add upstream https://github.com/Javis603/token-monitor.git
-          git fetch upstream main
-          git fetch origin feat/codex-web-cost-selection
-          mkdir -p out
-          git bundle create out/token-monitor.bundle \
-            refs/remotes/origin/feat/codex-web-cost-selection \
-            refs/remotes/upstream/main
-          {
-            echo "head=$(git rev-parse refs/remotes/origin/feat/codex-web-cost-selection)"
-            echo "base=$(git rev-parse refs/remotes/upstream/main)"
-            echo "merge_base=$(git merge-base refs/remotes/origin/feat/codex-web-cost-selection refs/remotes/upstream/main)"
-          } > out/metadata.txt
-      - uses: actions/upload-artifact@v4
-        with:
-          name: token-monitor-merge-bundle
-          path: out/
-          if-no-files-found: error
-          retention-days: 1
+          git fetch upstream "$upstream_head"
+          git branch upstream-main "$upstream_head"
+          set +e
+          git merge --no-commit --no-ff upstream-main
+          merge_status=$?
+          set -e
+          test "$merge_status" -ne 0
+          mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+          printf '%s\n' "${conflicts[@]}"
+          expected=(
+            src/electron/main.js
+            src/electron/renderer/index.html
+            src/shared/hubBuildRegistry.json
+            worker/src/shared/hubBuildRegistry.json
+          )
+          test "${conflicts[*]}" = "${expected[*]}"
+
+      - name: Resolve feature composition
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('src/electron/main.js')
+          text = p.read_text()
+          replacements = {
+              '''<<<<<<< HEAD
+            return projectUsageCosts(projectLimitStatsForDisplay(stats, {
+          =======
+            return projectModelAliasStats(projectLimitStatsForDisplay(stats, {
+          >>>>>>> upstream-main''': '''  return projectModelAliasStats(projectUsageCosts(projectLimitStatsForDisplay(stats, {''',
+              '''<<<<<<< HEAD
+            }), settings?.usageCostRules);
+          =======
+            }), settings?.modelAliases, { grouping: settings?.modelAliasGrouping });
+          >>>>>>> upstream-main''': '''  }), settings?.usageCostRules), settings?.modelAliases, {
+              grouping: settings?.modelAliasGrouping
+            });''',
+              '''<<<<<<< HEAD
+              usageCostRules: normalizeUsageCostRules(settings?.usageCostRules),
+          =======
+              modelAliases: Object.freeze(normalizeModelAliases(settings?.modelAliases)),
+              modelAliasGrouping: normalizeModelAliasGrouping(settings?.modelAliasGrouping),
+          >>>>>>> upstream-main''': '''    usageCostRules: normalizeUsageCostRules(settings?.usageCostRules),
+              modelAliases: Object.freeze(normalizeModelAliases(settings?.modelAliases)),
+              modelAliasGrouping: normalizeModelAliasGrouping(settings?.modelAliasGrouping),''',
+              '''<<<<<<< HEAD
+                  history: projectHistoryCosts(history, work.usageCostRules)
+          =======
+                  history: projectModelAliasHistory(history, work.modelAliases, { grouping: work.modelAliasGrouping })
+          >>>>>>> upstream-main''': '''        history: projectModelAliasHistory(
+                    projectHistoryCosts(history, work.usageCostRules),
+                    work.modelAliases,
+                    { grouping: work.modelAliasGrouping }
+                  )''',
+              '''<<<<<<< HEAD
+            const history = await getDashboardHistory({ raw: true }).catch(() => null);
+          =======
+            // Export remains lossless: local display aliases never rewrite exported IDs.
+            const history = await getCompleteHistory().catch(() => null);
+          >>>>>>> upstream-main''': '''  // Export remains lossless: local display preferences never rewrite exported IDs or costs.
+            const history = await getCompleteHistory().catch(() => null);''',
+              '''<<<<<<< HEAD
+                usageCostRules: normalizeUsageCostRules(patch.usageCostRules ?? settings.usageCostRules),
+          =======
+                sessionContextMetric: normalizeSessionContextMetric(patch.sessionContextMetric ?? settings.sessionContextMetric),
+          >>>>>>> upstream-main''': '''      usageCostRules: normalizeUsageCostRules(patch.usageCostRules ?? settings.usageCostRules),''',
+              '''<<<<<<< HEAD
+              if (JSON.stringify(settings.usageCostRules) !== JSON.stringify(previousSettingsState.usageCostRules)) {
+                refreshLimitStatsPresentation();
+                if (dashboardWindow && !dashboardWindow.isDestroyed()) dashboardWindow.webContents.send('dashboard:historyChanged');
+          =======
+              if (JSON.stringify(settings.modelAliases) !== JSON.stringify(previousSettingsState.modelAliases)
+                || settings.modelAliasGrouping !== previousSettingsState.modelAliasGrouping) {
+                // No collection/pricing refresh: regroup the cached source immediately,
+                // including when the hub is offline. Revision decoration invalidates the
+                // main renderer's full-history caches; the dashboard has its own event.
+                refreshLimitStatsPresentation();
+                if (dashboardWindow && !dashboardWindow.isDestroyed()) {
+                  try { dashboardWindow.webContents.send('dashboard:historyChanged'); } catch (_) {}
+                }
+          >>>>>>> upstream-main''': '''    const usageCostRulesChanged = JSON.stringify(settings.usageCostRules)
+                !== JSON.stringify(previousSettingsState.usageCostRules);
+              const modelAliasesChanged = JSON.stringify(settings.modelAliases)
+                !== JSON.stringify(previousSettingsState.modelAliases)
+                || settings.modelAliasGrouping !== previousSettingsState.modelAliasGrouping;
+              if (usageCostRulesChanged || modelAliasesChanged) {
+                // No collection/pricing refresh: re-project the cached source immediately,
+                // including when the hub is offline. Revision decoration invalidates the
+                // main renderer's full-history caches; the dashboard has its own event.
+                refreshLimitStatsPresentation();
+                if (dashboardWindow && !dashboardWindow.isDestroyed()) {
+                  try { dashboardWindow.webContents.send('dashboard:historyChanged'); } catch (_) {}
+                }''',
+          }
+          for old, new in replacements.items():
+              if old not in text:
+                  raise RuntimeError(f'missing conflict anchor: {old[:100]!r}')
+              text = text.replace(old, new, 1)
+          p.write_text(text)
+
+          p = Path('src/electron/renderer/index.html')
+          text = p.read_text()
+          old = '''<<<<<<< HEAD
+              <script src="../usageCostPolicy.js"></script>
+          =======
+              <script src="modelAliases.js"></script>
+              <script src="modelAliasForm.js"></script>
+          >>>>>>> upstream-main'''
+          new = '''    <script src="../usageCostPolicy.js"></script>
+              <script src="modelAliases.js"></script>
+              <script src="modelAliasForm.js"></script>'''
+          if old not in text:
+              raise RuntimeError('missing renderer script conflict')
+          p.write_text(text.replace(old, new, 1))
+
+          p = Path('tests/electron/usageCostIntegration.test.js')
+          text = p.read_text()
+          text = text.replace(
+              "const policy = require('../../src/electron/usageCostPolicy');\n",
+              "const policy = require('../../src/electron/usageCostPolicy');\n"
+              "const presentation = require('../../src/electron/modelAliasPresentation');\n",
+              1,
+          )
+          text = text.replace(
+              "return vm.runInNewContext(`(${body})`, { ...policy, ...dependencies });",
+              "return vm.runInNewContext(`(${body})`, {\n"
+              "    ...policy,\n"
+              "    ...presentation,\n"
+              "    syncProvenanceActive: () => false,\n"
+              "    ...dependencies\n"
+              "  });",
+              1,
+          )
+          p.write_text(text)
+
+          p = Path('tests/electron/modelAliasIntegration.test.js')
+          text = p.read_text()
+          text = text.replace(
+              "const presentation = require('../../src/electron/modelAliasPresentation');\n",
+              "const presentation = require('../../src/electron/modelAliasPresentation');\n"
+              "const costPolicy = require('../../src/electron/usageCostPolicy');\n",
+              1,
+          )
+          text = text.replace(
+              "return vm.runInNewContext(`(${body})`, { ...presentation, ...dependencies });",
+              "return vm.runInNewContext(`(${body})`, { ...presentation, ...costPolicy, ...dependencies });",
+              1,
+          )
+          p.write_text(text)
+          PY
+          git checkout --theirs src/shared/hubBuildRegistry.json worker/src/shared/hubBuildRegistry.json
+
+      - name: Install, regenerate and validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run update:hub-build
+          git add -A
+          test -z "$(git diff --name-only --diff-filter=U)"
+          ! grep -RIn '^<<<<<<<\|^=======\|^>>>>>>>' \
+            src/electron/main.js \
+            src/electron/renderer/index.html \
+            src/shared/hubBuildRegistry.json \
+            worker/src/shared/hubBuildRegistry.json
+          git diff upstream-main --check
+          npm run verify
+
+      - name: Commit and update the PR branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git commit -s -m 'merge: sync cost selection with current main'
+          git push origin HEAD:feat/codex-web-cost-selection
+          git push origin --delete ci/resolve-662-bundle || true
