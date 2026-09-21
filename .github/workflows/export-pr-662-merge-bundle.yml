@@ -1,0 +1,39 @@
+name: Export PR 662 merge bundle
+
+on:
+  push:
+    branches:
+      - ci/resolve-662-bundle
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build two-ref bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/Javis603/token-monitor.git
+          git fetch upstream main
+          git fetch origin feat/codex-web-cost-selection
+          mkdir -p out
+          git bundle create out/token-monitor.bundle \
+            refs/remotes/origin/feat/codex-web-cost-selection \
+            refs/remotes/upstream/main
+          {
+            echo "head=$(git rev-parse refs/remotes/origin/feat/codex-web-cost-selection)"
+            echo "base=$(git rev-parse refs/remotes/upstream/main)"
+            echo "merge_base=$(git merge-base refs/remotes/origin/feat/codex-web-cost-selection refs/remotes/upstream/main)"
+          } > out/metadata.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: token-monitor-merge-bundle
+          path: out/
+          if-no-files-found: error
+          retention-days: 1
